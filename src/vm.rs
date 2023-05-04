@@ -1,6 +1,7 @@
-use std::{time::{Instant}, collections::{HashMap}, hash::{SipHasher}};
-
-use std::hash::{Hasher};
+use std::
+{
+    collections::{HashMap}, hash::{Hasher, SipHasher}, rc::Rc, borrow::BorrowMut
+};
 
 #[cfg(feature="async")]
 use std::sync::{RwLock, Arc};
@@ -16,22 +17,219 @@ use std::cell::RefCell;
 use bytestream::{ByteOrder, StreamWriter};
 
 /// Type alias to clarify that this number refers to a variable uniquely
-type VariableIdentifier = u64;
+pub type VariableIdentifier = u64;
 
-#[inline(always)]
-pub fn variable_name_to_identifier(name: String) -> VariableIdentifier
+pub type NativeFunctionBinding = fn(vm: &VirtualMachine, frame: &StackFrame) -> Result<(), &'static str>;
+
+pub enum Function
 {
-    // Case insensitive
-    let processed_string = name.to_lowercase();
+    NativeFunction {
+        parameters: Vec<String>,
+        binding: NativeFunctionBinding
+    },
 
-    // FIXME: Unstable feature here? We need to ensure the hash algorithm remains static
-    let mut hasher = SipHasher::new();
-    hasher.write(processed_string.as_bytes());
-    return hasher.finish();
+    VirtualFunction {
+        parameters: Vec<String>,
+        instructions: InstructionSequence
+    }
+}
+
+impl Function
+{
+    pub fn call(&self, vm: &VirtualMachine, frame: &StackFrame) -> Result<(), &'static str>
+    {
+        match self
+        {
+            Function::NativeFunction { parameters, binding } => {
+                // It's up to the host function to figure out parameters here
+                Ok((binding)(vm, frame)?)
+            }
+
+            // Execute virtual function code
+            Function::VirtualFunction { parameters, instructions } => {
+                Ok(vm.interpret(instructions)?)
+            }
+        }
+    }
+}
+
+/// A namespace is a recursive structure used to store runtime generated data.
+pub struct Namespace<'a>
+{
+    /// Child namespaces - used for enumeration
+    #[cfg(not(feature="async"))]
+    pub children: RefCell<HashMap<String, Namespace<'a>>>,
+
+    /// All class definitions.
+    #[cfg(not(feature="async"))]
+    pub classes: RefCell<HashMap<String, ClassEntry>>,
+
+    /// A mapping of function name to function data
+    #[cfg(not(feature="async"))]
+    pub functions: RefCell<HashMap<String, Rc<Function>>>,
+
+    /// Child namespaces - used for enumeration
+    #[cfg(feature="async")]
+    pub children: Arc<RwLock<HashMap<String, Namespace>>>,
+
+    /// All class definitions.
+    #[cfg(feature="async")]
+    pub classes: Arc<RwLock<HashMap<String, ClassEntry>>>,
+
+    /// A mapping of function name to function data
+    #[cfg(feature="async")]
+    pub functions: Arc<RwLock<HashMap<String, Function>>>,
+
+    /// Lookup cache for function data
+    pub function_cache: RefCell<HashMap<u64, Rc<Function>>>
+}
+
+impl Namespace<'_>
+{
+    #[cfg(not(feature="async"))]
+    pub fn new() -> Self
+    {
+        return Self
+        {
+            children: RefCell::new(HashMap::new()),
+            classes: RefCell::new(HashMap::new()),
+            functions: RefCell::new(HashMap::new()),
+            function_cache: RefCell::new(HashMap::new())
+        };
+    }
+
+    #[cfg(feature="async")]
+    pub fn new() -> Self
+    {
+        return Self
+        {
+            children: Arc::new(RwLock::new(HashMap::new())),
+            classes: Arc::new(RwLock::new(HashMap::new())),
+            functions: Arc::new(RwLock::new(HashMap::new()))
+        };
+    }
+
+    pub fn add_function_entry_slice(&mut self, function: Function, path: &[String]) -> Result<(), &'static str>
+    {
+        // Need to descend more
+        if path.len() > 1
+        {
+            let next_namespace_name = &path[0].to_lowercase();
+            let next_slice = &path[1 ..];
+
+            let mut namespace_write = self.children.borrow_mut();
+            let namespace_lookup = namespace_write.get_mut(next_namespace_name);
+
+            return match namespace_lookup {
+                Some(next_namespace) => {
+                    next_namespace.add_function_entry_slice(function, next_slice)
+                },
+
+                None => {
+                    Err("Namespace Lookup Failed")
+                }
+            };
+        }
+
+        // We're at the final stop
+        let function_name = &path[0].to_lowercase();
+        let mut functions_write = self.functions.borrow_mut();
+
+        return match functions_write.insert(function_name.clone(), Rc::new(function))
+        {
+            Some(_insertion) => {
+                Ok(()) // FIXME: Signal an overwrite
+            },
+
+            None => {
+                Ok(())
+            }
+        }
+    }
+
+    pub fn add_function_entry(&mut self, function: Function, path: &Vec<String>) -> Result<(), &'static str>
+    {
+        return self.add_function_entry_slice(function, path.as_slice());
+    }
+
+    /// Performs a recursive search for a given function with no caching.
+    pub fn lookup_function_uncached_slice(&self, path: &[String]) -> Result<Rc<Function>, &'static str>
+    {
+        // Need to descend more
+        if path.len() > 1
+        {
+            let next_namespace_name = &path[0].to_lowercase();
+            let next_slice = &path[1 ..];
+
+            let namespace_read = self.children.borrow();
+            let namespace_lookup = namespace_read.get(next_namespace_name);
+
+            return match namespace_lookup {
+                Some(next_namespace) => {
+                    next_namespace.lookup_function_uncached_slice(next_slice)
+                },
+
+                None => {
+                    Err("Namespace Lookup Failed")
+                }
+            };
+        }
+
+        // We're at the final stop
+        let function_name = &path[0].to_lowercase();
+        let functions_read = self.functions.borrow();
+        let function_lookup = functions_read.get(function_name);
+        return match function_lookup {
+            Some(found_function) => {
+               Ok(found_function.clone())
+            },
+
+            None => {
+                Err("Function Lookup Failed")
+            }
+        };
+    }
+
+    pub fn lookup_function_cached(&mut self, path: &Vec<String>) -> Result<Rc<Function>, &'static str>
+    {
+        let mut hasher = SipHasher::new();
+        for path_element in path.iter()
+        {
+            hasher.write(path_element.to_lowercase().as_bytes());
+        }
+        let lookup_id = hasher.finish();
+
+        let cache_write = self.function_cache.borrow_mut();
+        let cache_search = cache_write.get(&lookup_id);
+
+        return match cache_search {
+            Some(cache_hit) => {
+                Ok(cache_hit.clone())
+            },
+            None => {
+                let slow_search = self.lookup_function_uncached_slice(path.as_slice())?;
+                Ok(slow_search)
+            }
+        };
+    }
+
+    pub fn lookup_function_uncached(&self, path: Vec<String>) -> Result<Rc<Function>, &'static str>
+    {
+        return self.lookup_function_uncached_slice(path.as_slice());
+    }
+}
+
+/// A virtual class in memory, used for typedefs
+pub struct ClassEntry
+{
+    pub name: String,
+    pub namespaces: Vec<String>,
+
+    pub functions: HashMap<String, Function>
 }
 
 #[derive(Debug, Clone)]
-pub enum AddressType {
+pub enum AddressValue {
     RelativeOffset {
         offset: i32
     },
@@ -79,7 +277,7 @@ impl VariableReference
 
     /// Performs a variable lookup, returning a raw value read from memory
     #[inline(always)]
-    pub fn deref(&self, vm: &VirtualMachine, frame: &StackFrame) -> RawValue
+    pub fn deref(&self, vm: &VirtualMachine, frame: &StackFrame) -> Result<RawValue, &'static str>
     {
         return match self {
             VariableReference::Global { value } => {
@@ -91,22 +289,20 @@ impl VariableReference
 
                 match globals_read.get(value) {
                     Some(value) => {
-                        value.clone()
+                        Ok(value.clone())
                     },
                     None => {
-                        // For now we mimic Torque where invalid lookups return ""
-                        RawValue::String { 0: StringValue { value: "".to_owned() }}
+                        Err("Variable Lookup Failed")
                     }
                 }
             },
             VariableReference::Local { value } => {
                 match frame.locals.get(value) {
                     Some(value) => {
-                        value.clone()
+                        Ok(value.clone())
                     },
                     None => {
-                        // For now we mimic Torque where invalid lookups return ""
-                        RawValue::String { 0: StringValue { value: "".to_owned() }}
+                        Err("Variable Lookup Failed")
                     }
                 }
             }
@@ -139,15 +335,10 @@ pub struct VariableValue {
     value: VariableReference
 }
 
-#[derive(Debug, Clone)]
-pub enum RawValue {
-    Float(FloatValue),
-    Integer(IntegerValue),
-    String(StringValue),
-    Boolean(BooleanValue),
-    Variable(VariableValue)
-}
+// VariableSoftRef = Unresolved; requires a runtime lookup
+// VariableHardRef = Resolved; memory can be read/write directly
 
+/// Wrapper value representing a stored value in the virtual machine runtime.
 #[derive(Debug, Clone)]
 pub enum SystemValue {
     Raw {
@@ -168,7 +359,15 @@ impl SystemValue {
             },
 
             SystemValue::Variable { value } => {
-                value.deref(vm, frame).clone()
+                match value.deref(vm, frame) {
+                    Ok(dereferenced) => {
+                        dereferenced
+                    },
+                    Err(_) => {
+                        // For now we mimic Torque where invalid lookups return ""
+                        RawValue::String { 0: StringValue { value: "".to_owned() }}
+                    }
+                }
             }
         } 
     }
@@ -190,6 +389,15 @@ impl SystemValue {
     pub fn equals(&self, vm: &VirtualMachine, frame: &StackFrame, rhs: SystemValue) -> bool {
         return self.as_raw(vm, frame).equals(vm, frame, &rhs.as_raw(vm, frame));
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum RawValue {
+    Float(FloatValue),
+    Integer(IntegerValue),
+    String(StringValue),
+    Boolean(BooleanValue),
+    Variable(VariableValue)
 }
 
 impl RawValue {
@@ -218,7 +426,14 @@ impl RawValue {
             },
 
             RawValue::Variable { 0: VariableValue { value }} => {
-                value.deref(vm, frame).as_string(vm, frame)
+                match value.deref(vm, frame) {
+                    Ok(dereferenced) => {
+                        dereferenced.as_string(vm, frame)
+                    }
+                    Err(_) => {
+                        "".to_owned()
+                    }
+                }
             }
         }
     }
@@ -307,7 +522,14 @@ impl RawValue {
             },
             
             RawValue::Variable { 0: VariableValue { value }} => {
-                value.deref(vm, frame).as_float(vm, frame)         
+                match value.deref(vm, frame) {
+                    Ok(dereferenced) => {
+                        dereferenced.as_float(vm, frame)
+                    }
+                    Err(_) => {
+                        0.0
+                    }
+                }      
             }
         } 
     }
@@ -339,7 +561,14 @@ impl RawValue {
             },
 
             RawValue::Variable { 0: VariableValue { value }} => {
-                value.deref(vm, frame).as_integer(vm, frame)           
+                match value.deref(vm, frame) {
+                    Ok(dereferenced) => {
+                        dereferenced.as_integer(vm, frame)
+                    }
+                    Err(_) => {
+                        0
+                    }
+                }          
             }
         } 
     }
@@ -399,13 +628,13 @@ pub enum OpCode
 
     },
     Jump {
-        target: AddressType
+        target: AddressValue
     },
     JumpTrue {
-        target: AddressType
+        target: AddressValue
     },
     JumpFalse {
-        target: AddressType
+        target: AddressValue
     },
     NOP {
 
@@ -429,7 +658,7 @@ pub enum OpCode
 
     },
     CallFunction {
-
+        target: Vec<String>
     },
 
     // Logical Instructions
@@ -488,11 +717,7 @@ pub enum OpCode
 
     },
 
-
-    PushLocalReference {
-        variable: VariableReference
-    },
-    PushGlobalReference {
+    PushVariable {
         variable: VariableReference
     }
 }
@@ -516,7 +741,7 @@ impl OpCode
             OpCode::Concat {  } => "Error".to_owned(),
             OpCode::Negate {  } => "Error".to_owned(),
             OpCode::Not {  } => "Error".to_owned(),
-            OpCode::CallFunction {  } => "Error".to_owned(),
+            OpCode::CallFunction { target } => "Error".to_owned(),
             OpCode::LogicalAnd {  } => "Error".to_owned(),
             OpCode::LogicalOr {  } => "Error".to_owned(),
             OpCode::BitwiseAnd {  } => "Error".to_owned(),
@@ -533,8 +758,7 @@ impl OpCode
             OpCode::NotEquals {  } => "Error".to_owned(),
             OpCode::StringEquals {  } => "Error".to_owned(),
             OpCode::StringNotEqual {  } => "Error".to_owned(),
-            OpCode::PushLocalReference { variable } => "Error".to_owned(),
-            OpCode::PushGlobalReference { variable } => "Error".to_owned()
+            OpCode::PushVariable { variable } => "Error".to_owned()
         };
     }
 }
@@ -583,7 +807,7 @@ pub struct StackFrame
     pub locals: HashMap<VariableIdentifier, RawValue>
 }
 
-pub struct VirtualMachine
+pub struct VirtualMachine<'a>
 {
     /// A mapping of global string identifiers to their value
     #[cfg(feature="async")]
@@ -591,14 +815,17 @@ pub struct VirtualMachine
 
     /// A mapping of global string identifiers to their value
     #[cfg(not(feature="async"))]
-    pub globals: RefCell<HashMap<VariableIdentifier, RawValue>>
+    pub globals: RefCell<HashMap<VariableIdentifier, RawValue>>,
+
+    /// Root namespaces
+    pub root_namespace: RefCell<Namespace<'a>>
 }
 
 #[inline(always)]
-fn process_address(offset_out: &mut usize, address: &AddressType)
+fn process_address(offset_out: &mut usize, address: &AddressValue)
 {
     match address {
-        AddressType::RelativeOffset { offset } => {
+        AddressValue::RelativeOffset { offset } => {
             // FIXME: Duplicate code
             if *offset < 0 {
                 let calculated_offset = (*offset * -1) as usize;
@@ -609,13 +836,13 @@ fn process_address(offset_out: &mut usize, address: &AddressType)
                 *offset_out += calculated_offset;
             }
         },
-        AddressType::AbsoluteTarget { index } => {
+        AddressValue::AbsoluteTarget { index } => {
             *offset_out = *index;
         }
     }
 }
 
-impl VirtualMachine
+impl VirtualMachine<'_>
 {
     #[inline(always)]
     #[cfg(feature="async")]
@@ -626,7 +853,8 @@ impl VirtualMachine
         drop(globals_write);
 
         return Self {
-            globals: globals
+            globals: globals,
+            root_namespace: Namespace::new()
         };
     }
 
@@ -637,6 +865,7 @@ impl VirtualMachine
         globals.reserve(1024);
 
         return Self {
+            root_namespace: RefCell::new(Namespace::new()),
             globals: RefCell::new(globals)
         };
     }
@@ -763,15 +992,16 @@ impl VirtualMachine
                 },
                 OpCode::Negate {  } => {
                     panic!("Not Implemented");
-                    //let current_value = self.stack.last_mut().unwrap();
-                    //current_value.negate(self);
+                     let current_value = frame.stack.last_mut().unwrap();
                 },
                 OpCode::Not {  } => {
                     let current_value = frame.stack.pop().unwrap();
                     frame.stack.push(SystemValue::Raw { value: RawValue::Boolean { 0: BooleanValue { value: !current_value.as_raw(self, &frame).as_boolean(self, &frame) }}});
                 },
-                OpCode::CallFunction {  } => {
-                    panic!("Not Implemented");
+                OpCode::CallFunction { target } => {
+                    let mut namespace_write = self.root_namespace.borrow_mut();
+                    let function_lookup = namespace_write.lookup_function_cached(target).unwrap();
+                    function_lookup.call(self, &frame).unwrap();
                 },
                 OpCode::LogicalAnd {  } => {
                     let lhs = frame.stack.pop().unwrap();
@@ -875,10 +1105,7 @@ impl VirtualMachine
 
                     frame.stack.push(SystemValue::Raw { value: RawValue::Boolean { 0: BooleanValue { value: lhs.as_raw(self, &frame).as_string(self, &frame) != rhs.as_raw(self, &frame).as_string(self, &frame) }}});
                 },
-                OpCode::PushLocalReference { variable } => {
-                    frame.stack.push(SystemValue::Variable { value: variable.clone() });
-                },
-                OpCode::PushGlobalReference { variable } => {
+                OpCode::PushVariable { variable } => {
                     frame.stack.push(SystemValue::Variable { value: variable.clone() });
                 }
             }

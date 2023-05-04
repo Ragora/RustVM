@@ -9,9 +9,8 @@ edition = "2021"
 async = []
 fault-checks = []
 register-vm = []
-variable-ptr = []
 fixed-registers = ["register-vm"]
-default = ["variable-ptr"]
+default = []
 
 [dependencies]
 bytestream = "0.4.1"

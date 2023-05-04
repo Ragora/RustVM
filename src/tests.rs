@@ -1,12 +1,47 @@
-
-
 #[cfg(test)]
 mod tests {
-
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use std::{time::{Instant}, collections::{HashMap}, hash::{SipHasher}};
+    use std::sync::{RwLock, Arc};
+    use std::thread;
+    use std::sync;
 
-    use crate::vm::{InstructionSequence, OpCode, VariableReference, variable_name_to_identifier, PushFloat, AddressType, VirtualMachine};
+    use crate::util::variable_name_to_identifier;
+    use crate::vm::{InstructionSequence, OpCode, VariableReference, Function, RawValue, VariableIdentifier, PushFloat, AddressValue, VirtualMachine};
+
+    #[test]
+    fn test_functions()
+    {
+        // FIXME: Get a more accurate compile result by sourcing this post-compile
+        let opcodes = InstructionSequence { 
+            ops: vec![
+                OpCode::CallFunction { target: vec!["quit".to_owned()] },
+            ]
+        };
+
+        let vm = VirtualMachine::new();
+
+        // Add a native binding
+        let mut namespace_write = vm.root_namespace.borrow_mut();
+        namespace_write.add_function_entry(Function::NativeFunction { 
+            parameters: Vec::new(), 
+            binding: |_vm, _frame| -> Result<(), &'static str> {
+                Ok(())
+            }
+        }, &vec!["quit".to_owned()]).unwrap();
+        drop(namespace_write);
+
+        // Run code
+        let start_time = Instant::now();
+        for _ in 0 .. 99999
+        {
+            vm.interpret(&opcodes).unwrap();   
+        }
+        let end_time = Instant::now();
+        let delta = end_time - start_time;
+
+        println!("0param Call Time: {:?}", delta);
+    }
 
     #[test]
     fn test_vm() {
@@ -15,19 +50,19 @@ mod tests {
             ops: vec![
             // Assign %counter = 0
             OpCode::PushInteger { value: 0 },
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("counter_a".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("counter_a".to_owned()) } },
             OpCode::Assignment { },
             OpCode::Pop { },
             
             // Assign %result = 0.0
             OpCode::PushFloat { 0: PushFloat { value: 0.0 }},
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("result_a".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("result_a".to_owned()) } },
             OpCode::Assignment { },
             OpCode::Pop { },
 
             // Assign %iterations
             OpCode::PushInteger { value: 999999 },
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("iterations_a".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("iterations_a".to_owned()) } },
             OpCode::Assignment { },
             OpCode::Pop { },
 
@@ -35,33 +70,33 @@ mod tests {
             OpCode::NOP { },
 
             // Loop %iterations iterations with current VM state and perform a calculation
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("result_a".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("result_a".to_owned()) } },
             OpCode::PushFloat { 0: PushFloat { value: 3.14 }},
             OpCode::Add { },
 
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("result_a".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("result_a".to_owned()) } },
             OpCode::Swap { }, // Crappy workaround until I feel like fixing the stack arrangement
             OpCode::Assignment { },
             OpCode::Pop { },
 
             // Increment counter
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("counter_a".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("counter_a".to_owned()) } },
             OpCode::PushInteger { value: 1 },
             OpCode::Add { },
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("counter_a".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("counter_a".to_owned()) } },
             OpCode::Assignment { },
             OpCode::Pop { },
 
             // Check if loop condition is met - %counter >= %iterations
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("iterations_a".to_owned()) } },
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("counter_a".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("iterations_a".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("counter_a".to_owned()) } },
 
             OpCode::GreaterThanOrEqual { },
-            OpCode::JumpFalse { target: AddressType::AbsoluteTarget { index: 12 } },
+            OpCode::JumpFalse { target: AddressValue::AbsoluteTarget { index: 12 } },
 
             // Write final result to a global
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("result_a".to_owned()) } },
-            OpCode::PushGlobalReference { variable: VariableReference::Global { value: variable_name_to_identifier("result_a".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("result_a".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Global { value: variable_name_to_identifier("result_a".to_owned()) } },
             OpCode::Assignment {  }
         ]};
 
@@ -69,19 +104,19 @@ mod tests {
             ops: vec![
             // Assign %counter = 0
             OpCode::PushInteger { value: 0 },
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("counter_b".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("counter_b".to_owned()) } },
             OpCode::Assignment { },
             OpCode::Pop { },
             
             // Assign %result = 0.0
             OpCode::PushFloat { 0: PushFloat { value: 0.0 }},
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("result_b".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("result_b".to_owned()) } },
             OpCode::Assignment { },
             OpCode::Pop { },
 
             // Assign %iterations
             OpCode::PushInteger { value: 999999 },
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("iterations_b".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("iterations_b".to_owned()) } },
             OpCode::Assignment { },
             OpCode::Pop { },
 
@@ -89,33 +124,33 @@ mod tests {
             OpCode::NOP { },
 
             // Loop %iterations iterations with current VM state and perform a calculation
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("result_b".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("result_b".to_owned()) } },
             OpCode::PushFloat { 0: PushFloat { value: 3.14 }},
             OpCode::Add { },
 
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("result_b".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("result_b".to_owned()) } },
             OpCode::Swap { }, // Crappy workaround until I feel like fixing the stack arrangement
             OpCode::Assignment { },
             OpCode::Pop { },
 
             // Increment counter
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("counter_b".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("counter_b".to_owned()) } },
             OpCode::PushInteger { value: 1 },
             OpCode::Add { },
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("counter_b".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("counter_b".to_owned()) } },
             OpCode::Assignment { },
             OpCode::Pop { },
 
             // Check if loop condition is met - %counter >= %iterations
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("iterations_b".to_owned()) } },
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("counter_b".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("iterations_b".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("counter_b".to_owned()) } },
 
             OpCode::GreaterThanOrEqual { },
-            OpCode::JumpFalse { target: AddressType::AbsoluteTarget { index: 12 } },
+            OpCode::JumpFalse { target: AddressValue::AbsoluteTarget { index: 12 } },
 
             // Write final result to a global
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("result_b".to_owned()) } },
-            OpCode::PushGlobalReference { variable: VariableReference::Global { value: variable_name_to_identifier("result_b".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("result_b".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Global { value: variable_name_to_identifier("result_b".to_owned()) } },
             OpCode::Assignment {  }
         ]};
 
@@ -123,19 +158,19 @@ mod tests {
             ops: vec![
             // Assign %counter = 0
             OpCode::PushInteger { value: 0 },
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("counter_c".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("counter_c".to_owned()) } },
             OpCode::Assignment { },
             OpCode::Pop { },
             
             // Assign %result = 0.0
             OpCode::PushFloat { 0: PushFloat { value: 0.0 }},
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("result_c".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("result_c".to_owned()) } },
             OpCode::Assignment { },
             OpCode::Pop { },
 
             // Assign %iterations
             OpCode::PushInteger { value: 999999 },
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("iterations_c".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("iterations_c".to_owned()) } },
             OpCode::Assignment { },
             OpCode::Pop { },
 
@@ -143,33 +178,33 @@ mod tests {
             OpCode::NOP { },
 
             // Loop %iterations iterations with current VM state and perform a calculation
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("result_c".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("result_c".to_owned()) } },
             OpCode::PushFloat { 0: PushFloat { value: 3.14 }},
             OpCode::Add { },
 
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("result_c".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("result_c".to_owned()) } },
             OpCode::Swap { }, // Crappy workaround until I feel like fixing the stack arrangement
             OpCode::Assignment { },
             OpCode::Pop { },
 
             // Increment counter
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("counter_c".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("counter_c".to_owned()) } },
             OpCode::PushInteger { value: 1 },
             OpCode::Add { },
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("counter_c".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("counter_c".to_owned()) } },
             OpCode::Assignment { },
             OpCode::Pop { },
 
             // Check if loop condition is met - %counter >= %iterations
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("iterations_c".to_owned()) } },
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("counter_c".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("iterations_c".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("counter_c".to_owned()) } },
 
             OpCode::GreaterThanOrEqual { },
-            OpCode::JumpFalse { target: AddressType::AbsoluteTarget { index: 12 } },
+            OpCode::JumpFalse { target: AddressValue::AbsoluteTarget { index: 12 } },
 
             // Write final result to a global
-            OpCode::PushLocalReference { variable: VariableReference::Local { value: variable_name_to_identifier("result_c".to_owned()) } },
-            OpCode::PushGlobalReference { variable: VariableReference::Global { value: variable_name_to_identifier("result_c".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Local { value: variable_name_to_identifier("result_c".to_owned()) } },
+            OpCode::PushVariable { variable: VariableReference::Global { value: variable_name_to_identifier("result_c".to_owned()) } },
             OpCode::Assignment {  }
         ]};
 
