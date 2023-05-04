@@ -1,0 +1,24 @@
+[package]
+name = "PerfTest"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+async = []
+fault-checks = []
+register-vm = []
+variable-ptr = []
+fixed-registers = ["register-vm"]
+default = ["variable-ptr"]
+
+[dependencies]
+bytestream = "0.4.1"
+libc = "0.2.142"
+
+[profile.release]
+strip = "debuginfo"
+overflow-checks = false
+lto = true
+opt-level = 3

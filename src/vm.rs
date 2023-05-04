@@ -15,8 +15,23 @@ use std::cell::RefCell;
 
 use bytestream::{ByteOrder, StreamWriter};
 
+/// Type alias to clarify that this number refers to a variable uniquely
+type VariableIdentifier = u64;
+
+#[inline(always)]
+pub fn variable_name_to_identifier(name: String) -> VariableIdentifier
+{
+    // Case insensitive
+    let processed_string = name.to_lowercase();
+
+    // FIXME: Unstable feature here? We need to ensure the hash algorithm remains static
+    let mut hasher = SipHasher::new();
+    hasher.write(processed_string.as_bytes());
+    return hasher.finish();
+}
+
 #[derive(Debug, Clone)]
-enum AddressType {
+pub enum AddressType {
     RelativeOffset {
         offset: i32
     },
@@ -27,12 +42,12 @@ enum AddressType {
 }
 
 #[derive(Debug, Clone)]
-enum VariableReference {
+pub enum VariableReference {
     Global {
-        value: String
+        value: VariableIdentifier
     },
     Local {
-        value: String
+        value: VariableIdentifier
     }
 }
 
@@ -125,7 +140,7 @@ pub struct VariableValue {
 }
 
 #[derive(Debug, Clone)]
-enum RawValue {
+pub enum RawValue {
     Float(FloatValue),
     Integer(IntegerValue),
     String(StringValue),
@@ -134,7 +149,7 @@ enum RawValue {
 }
 
 #[derive(Debug, Clone)]
-enum SystemValue {
+pub enum SystemValue {
     Raw {
         value: RawValue
     },
@@ -366,10 +381,10 @@ impl RawValue {
 
 pub struct PushFloat
 {
-    value: f32
+    pub value: f32
 }
 
-enum OpCode
+pub enum OpCode
 {
     // General state management
     PushFloat(PushFloat),
@@ -525,7 +540,7 @@ impl OpCode
 }
 
 //type InstructionSequence = Vec<OpCode>;
-struct InstructionSequence
+pub struct InstructionSequence
 {
     pub ops: Vec<OpCode>
 }
@@ -558,24 +573,25 @@ impl InstructionSequence
     }
 }
 
-struct StackFrame
+pub struct StackFrame
 {
     /// Current VM thread-local stack state
+    #[cfg(not(feature="register-vm"))]
     pub stack: Vec<SystemValue>,
 
     /// Local thread-local variables allocated at this frame
-    pub locals: HashMap<String, RawValue>
+    pub locals: HashMap<VariableIdentifier, RawValue>
 }
 
-struct VirtualMachine
+pub struct VirtualMachine
 {
     /// A mapping of global string identifiers to their value
     #[cfg(feature="async")]
-    pub globals: Arc<RwLock<HashMap<String, RawValue>>>,
+    pub globals: Arc<RwLock<HashMap<VariableIdentifier, RawValue>>>,
 
     /// A mapping of global string identifiers to their value
     #[cfg(not(feature="async"))]
-    pub globals: RefCell<HashMap<String, RawValue>>
+    pub globals: RefCell<HashMap<VariableIdentifier, RawValue>>
 }
 
 #[inline(always)]
@@ -604,7 +620,7 @@ impl VirtualMachine
     #[inline(always)]
     #[cfg(feature="async")]
     pub fn new() -> Self {
-        let globals: Arc<RwLock<HashMap<String, RawValue>>> = Arc::new(RwLock::new(HashMap::new()));
+        let globals: Arc<RwLock<HashMap<VariableIdentifier, RawValue>>> = Arc::new(RwLock::new(HashMap::new()));
         let mut globals_write = globals.write().unwrap();
         globals_write.reserve(1024);
         drop(globals_write);
@@ -617,7 +633,7 @@ impl VirtualMachine
     #[inline(always)]
     #[cfg(not(feature="async"))]
     pub fn new() -> Self {
-        let mut globals: HashMap<String, RawValue> = HashMap::new();
+        let mut globals: HashMap<VariableIdentifier, RawValue> = HashMap::new();
         globals.reserve(1024);
 
         return Self {
@@ -806,7 +822,6 @@ impl VirtualMachine
                     let lhs = frame.stack.pop().unwrap();
                     let rhs = frame.stack.pop().unwrap();
 
-
                     let result = lhs.as_raw(self, &frame).multiply(&rhs.as_raw(self, &frame), self, &frame);
                     frame.stack.push(SystemValue::Raw { value: RawValue::Float { 0: FloatValue { value: result }}});
                 },
@@ -868,219 +883,5 @@ impl VirtualMachine
                 }
             }
         }
-    }
-}
-
-pub fn main() {
-    // FIXME: Get a more accurate compile result by sourcing this post-compile
-    let opcodes_a = InstructionSequence { 
-        ops: vec![
-        // Assign %counter = 0
-        OpCode::PushInteger { value: 0 },
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "counter_a".to_owned() } },
-        OpCode::Assignment { },
-        OpCode::Pop { },
-        
-        // Assign %result = 0.0
-        OpCode::PushFloat { 0: PushFloat { value: 0.0 }},
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "result_a".to_owned() } },
-        OpCode::Assignment { },
-        OpCode::Pop { },
-
-        // Assign %iterations
-        OpCode::PushInteger { value: 999999 },
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "iterations_a".to_owned() } },
-        OpCode::Assignment { },
-        OpCode::Pop { },
-
-        // 12th index is start of program
-        OpCode::NOP { },
-
-        // Loop %iterations iterations with current VM state and perform a calculation
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "result_a".to_owned() } },
-        OpCode::PushFloat { 0: PushFloat { value: 3.14 }},
-        OpCode::Add { },
-
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "result_a".to_owned() } },
-        OpCode::Swap { }, // Crappy workaround until I feel like fixing the stack arrangement
-        OpCode::Assignment { },
-        OpCode::Pop { },
-
-        // Increment counter
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "counter_a".to_owned() } },
-        OpCode::PushInteger { value: 1 },
-        OpCode::Add { },
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "counter_a".to_owned() } },
-        OpCode::Assignment { },
-        OpCode::Pop { },
-
-        // Check if loop condition is met - %counter >= %iterations
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "iterations_a".to_owned() } },
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "counter_a".to_owned() } },
-
-        OpCode::GreaterThanOrEqual { },
-        OpCode::JumpFalse { target: AddressType::AbsoluteTarget { index: 12 } },
-
-        // Write final result to a global
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "result_a".to_owned() } },
-        OpCode::PushGlobalReference { variable: VariableReference::Global { value: "result_a".to_owned() } },
-        OpCode::Assignment {  }
-    ]};
-
-    let opcodes_b = InstructionSequence { 
-        ops: vec![
-        // Assign %counter = 0
-        OpCode::PushInteger { value: 0 },
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "counter_b".to_owned() } },
-        OpCode::Assignment { },
-        OpCode::Pop { },
-        
-        // Assign %result = 0.0
-        OpCode::PushFloat { 0: PushFloat { value: 0.0 }},
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "result_b".to_owned() } },
-        OpCode::Assignment { },
-        OpCode::Pop { },
-
-        // Assign %iterations
-        OpCode::PushInteger { value: 999999 },
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "iterations_b".to_owned() } },
-        OpCode::Assignment { },
-        OpCode::Pop { },
-
-        // 12th index is start of program
-        OpCode::NOP { },
-
-        // Loop %iterations iterations with current VM state and perform a calculation
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "result_b".to_owned() } },
-        OpCode::PushFloat { 0: PushFloat { value: 3.14 }},
-        OpCode::Add { },
-
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "result_b".to_owned() } },
-        OpCode::Swap { }, // Crappy workaround until I feel like fixing the stack arrangement
-        OpCode::Assignment { },
-        OpCode::Pop { },
-
-        // Increment counter
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "counter_b".to_owned() } },
-        OpCode::PushInteger { value: 1 },
-        OpCode::Add { },
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "counter_b".to_owned() } },
-        OpCode::Assignment { },
-        OpCode::Pop { },
-
-        // Check if loop condition is met - %counter >= %iterations
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "iterations_b".to_owned() } },
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "counter_b".to_owned() } },
-
-        OpCode::GreaterThanOrEqual { },
-        OpCode::JumpFalse { target: AddressType::AbsoluteTarget { index: 12 } },
-
-        // Write final result to a global
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "result_b".to_owned() } },
-        OpCode::PushGlobalReference { variable: VariableReference::Global { value: "result_b".to_owned() } },
-        OpCode::Assignment {  }
-    ]};
-
-    let opcodes_c = InstructionSequence { 
-        ops: vec![
-        // Assign %counter = 0
-        OpCode::PushInteger { value: 0 },
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "counter_c".to_owned() } },
-        OpCode::Assignment { },
-        OpCode::Pop { },
-        
-        // Assign %result = 0.0
-        OpCode::PushFloat { 0: PushFloat { value: 0.0 }},
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "result_c".to_owned() } },
-        OpCode::Assignment { },
-        OpCode::Pop { },
-
-        // Assign %iterations
-        OpCode::PushInteger { value: 999999 },
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "iterations_c".to_owned() } },
-        OpCode::Assignment { },
-        OpCode::Pop { },
-
-        // 12th index is start of program
-        OpCode::NOP { },
-
-        // Loop %iterations iterations with current VM state and perform a calculation
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "result_c".to_owned() } },
-        OpCode::PushFloat { 0: PushFloat { value: 3.14 }},
-        OpCode::Add { },
-
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "result_c".to_owned() } },
-        OpCode::Swap { }, // Crappy workaround until I feel like fixing the stack arrangement
-        OpCode::Assignment { },
-        OpCode::Pop { },
-
-        // Increment counter
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "counter_c".to_owned() } },
-        OpCode::PushInteger { value: 1 },
-        OpCode::Add { },
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "counter_c".to_owned() } },
-        OpCode::Assignment { },
-        OpCode::Pop { },
-
-        // Check if loop condition is met - %counter >= %iterations
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "iterations_c".to_owned() } },
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "counter_c".to_owned() } },
-
-        OpCode::GreaterThanOrEqual { },
-        OpCode::JumpFalse { target: AddressType::AbsoluteTarget { index: 12 } },
-
-        // Write final result to a global
-        OpCode::PushLocalReference { variable: VariableReference::Local { value: "result_c".to_owned() } },
-        OpCode::PushGlobalReference { variable: VariableReference::Global { value: "result_c".to_owned() } },
-        OpCode::Assignment {  }
-    ]};
-
-    // Ask VM to execute top level machine code
-    let vm = VirtualMachine::new();
-    #[cfg(feature="async")]
-    {
-        let start_time = Instant::now();
-
-        // Wrap the VM in an Arc
-        let vm_handle = Arc::new(vm);
-
-        let vm_a_handle = vm_handle.clone();
-        let vm_b_handle = vm_handle.clone();
-        let vm_c_handle = vm_handle.clone();
-
-        let thread_a = thread::spawn(move || {
-            vm_a_handle.interpret(&opcodes_a).unwrap();
-        });
-        
-        let thread_b = thread::spawn(move || {
-            vm_b_handle.interpret(&opcodes_b).unwrap();
-        });
-
-        let thread_c = thread::spawn(move || {
-            vm_c_handle.interpret(&opcodes_c).unwrap();
-        });
-        thread_a.join().unwrap();
-        thread_b.join().unwrap();
-        thread_c.join().unwrap();
-        
-        let end_time = Instant::now();
-        let delta = end_time - start_time;
-    
-        let globals_read: sync::RwLockReadGuard<HashMap<String, RawValue>> = vm_handle.globals.read().unwrap();
-        println!("{:?} {:?} {:?} Exec Time: {:?}", globals_read.get(&"result_a".to_owned()).unwrap(), globals_read.get(&"result_b".to_owned()).unwrap(), globals_read.get(&"result_c".to_owned()).unwrap(), delta);
-    }
-
-    #[cfg(not(feature="async"))]
-    {
-        let start_time = Instant::now();
-       // for _ in 0 .. 2
-        {
-            vm.interpret(&opcodes_a).unwrap();
-        }
-        let end_time = Instant::now();
-    
-        let delta = end_time - start_time;
-        let globals_read = &vm.globals.take();
-        println!("{:?} Exec Time: {:?}", globals_read.get(&"result_a".to_owned()).unwrap(), delta);       
     }
 }
