@@ -1,6 +1,6 @@
 use std::
 {
-    collections::{HashMap}, hash::{Hasher, SipHasher}, rc::Rc, borrow::BorrowMut, marker::PhantomData
+    collections::{HashMap}, hash::{Hasher, SipHasher}, rc::Rc, borrow::{BorrowMut, Borrow}, marker::PhantomData
 };
 
 #[cfg(feature="async")]
@@ -79,18 +79,18 @@ pub struct Namespace<'a, State> where State: Clone
 
     /// Child namespaces - used for enumeration
     #[cfg(feature="async")]
-    pub children: Arc<RwLock<HashMap<String, Namespace>>>,
+    pub children: Arc<RwLock<HashMap<String, Namespace<'a, State>>>>,
 
     /// All class definitions.
     #[cfg(feature="async")]
-    pub classes: Arc<RwLock<HashMap<String, ClassEntry>>>,
+    pub classes: Arc<RwLock<HashMap<String, ClassEntry<State>>>>,
 
     /// A mapping of function name to function data
     #[cfg(feature="async")]
-    pub functions: Arc<RwLock<HashMap<String, Function>>>,
+    pub functions: Arc<RwLock<HashMap<String, Arc<Function<State>>>>>,
 
     /// Lookup cache for function data
-    pub function_cache: RefCell<HashMap<u64, Rc<Function<State>>>>
+    pub function_cache: RefCell<HashMap<u64, Arc<Function<State>>>>
 }
 
 impl<State> Namespace<'_, State> where State: Clone
@@ -114,7 +114,8 @@ impl<State> Namespace<'_, State> where State: Clone
         {
             children: Arc::new(RwLock::new(HashMap::new())),
             classes: Arc::new(RwLock::new(HashMap::new())),
-            functions: Arc::new(RwLock::new(HashMap::new()))
+            functions: Arc::new(RwLock::new(HashMap::new())),
+            function_cache: RefCell::new(HashMap::new())
         };
     }
 
@@ -126,7 +127,7 @@ impl<State> Namespace<'_, State> where State: Clone
             let next_namespace_name = &path[0].to_lowercase();
             let next_slice = &path[1 ..];
 
-            let mut namespace_write = self.children.borrow_mut();
+            let mut namespace_write = self.children.write().unwrap();
             let namespace_lookup = namespace_write.get_mut(next_namespace_name);
 
             return match namespace_lookup {
@@ -144,6 +145,7 @@ impl<State> Namespace<'_, State> where State: Clone
         let function_name = &path[0].to_lowercase();
         let mut functions_write = self.functions.borrow_mut();
 
+        #[cfg(not(feature="async"))]
         return match functions_write.insert(function_name.clone(), Rc::new(function))
         {
             Some(_insertion) => {
@@ -153,7 +155,19 @@ impl<State> Namespace<'_, State> where State: Clone
             None => {
                 Ok(())
             }
-        }
+        };
+
+        #[cfg(feature="async")]
+        return match functions_write.write().unwrap().insert(function_name.clone(), Arc::new(function))
+        {
+            Some(_insertion) => {
+                Ok(()) // FIXME: Signal an overwrite
+            },
+
+            None => {
+                Ok(())
+            }
+        };
     }
 
     pub fn add_function_entry(&mut self, function: Function<State>, path: &Vec<String>) -> Result<(), &'static str>
@@ -162,15 +176,20 @@ impl<State> Namespace<'_, State> where State: Clone
     }
 
     /// Performs a recursive search for a given function with no caching.
-    pub fn lookup_function_uncached_slice(&self, path: &[String]) -> Result<Rc<Function<State>>, &'static str>
+    pub fn lookup_function_uncached_slice(&self, path: &[String]) -> Result<Arc<Function<State>>, &'static str> // Result<Rc<Function<State>>, &'static str>
     {
         // Need to descend more
         if path.len() > 1
         {
             let next_namespace_name = &path[0].to_lowercase();
             let next_slice = &path[1 ..];
-
+            
+            #[cfg(not(feature="async"))]
             let namespace_read = self.children.borrow();
+
+            #[cfg(feature="async")]
+            let namespace_read = self.children.read().unwrap(); //.read().borrow().unwrap();
+
             let namespace_lookup = namespace_read.get(next_namespace_name);
 
             return match namespace_lookup {
@@ -186,7 +205,13 @@ impl<State> Namespace<'_, State> where State: Clone
 
         // We're at the final stop
         let function_name = &path[0].to_lowercase();
+
+        #[cfg(not(feature="async"))]
         let functions_read = self.functions.borrow();
+
+        #[cfg(feature="async")]
+        let functions_read = self.functions.read().unwrap();
+
         let function_lookup = functions_read.get(function_name);
         return match function_lookup {
             Some(found_function) => {
@@ -199,7 +224,7 @@ impl<State> Namespace<'_, State> where State: Clone
         };
     }
 
-    pub fn lookup_function_cached(&mut self, path: &Vec<String>) -> Result<Rc<Function<State>>, &'static str>
+    pub fn lookup_function_cached(&mut self, path: &Vec<String>) -> Result<Arc<Function<State>>, &'static str> //Result<Rc<Function<State>>, &'static str>
     {
         let mut hasher = SipHasher::new();
         for path_element in path.iter()
@@ -222,7 +247,7 @@ impl<State> Namespace<'_, State> where State: Clone
         };
     }
 
-    pub fn lookup_function_uncached(&self, path: Vec<String>) -> Result<Rc<Function<State>>, &'static str>
+    pub fn lookup_function_uncached(&self, path: Vec<String>) -> Result<Arc<Function<State>>, &'static str> //Result<Rc<Function<State>>, &'static str>
     {
         return self.lookup_function_uncached_slice(path.as_slice());
     }
@@ -822,7 +847,7 @@ pub struct VirtualMachine<'a, State> where State: Clone
 {
     /// A mapping of global string identifiers to their value
     #[cfg(feature="async")]
-    pub globals: Arc<RwLock<HashMap<VariableIdentifier, RawValue>>>,
+    pub globals: Arc<RwLock<HashMap<VariableIdentifier, RawValue<State>>>>,
 
     /// A mapping of global string identifiers to their value
     #[cfg(not(feature="async"))]
@@ -860,15 +885,16 @@ impl<State> VirtualMachine<'_, State> where State: Clone
 {
     #[inline(always)]
     #[cfg(feature="async")]
-    pub fn new() -> Self {
-        let globals: Arc<RwLock<HashMap<VariableIdentifier, RawValue>>> = Arc::new(RwLock::new(HashMap::new()));
+    pub fn new(state: State) -> Self {
+        let globals: Arc<RwLock<HashMap<VariableIdentifier, RawValue<State>>>> = Arc::new(RwLock::new(HashMap::new()));
         let mut globals_write = globals.write().unwrap();
         globals_write.reserve(1024);
         drop(globals_write);
 
         return Self {
             globals: globals,
-            root_namespace: Namespace::new()
+            state: state,
+            root_namespace: RefCell::new(Namespace::new()),
         };
     }
 

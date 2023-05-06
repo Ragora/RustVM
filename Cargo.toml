@@ -10,14 +10,22 @@ async = []
 fault-checks = []
 register-vm = []
 fixed-registers = ["register-vm"]
-default = []
+default = ["async"]
 
 [dependencies]
 bytestream = "0.4.1"
 libc = "0.2.142"
+pest = "2.6.0"
 
 [profile.release]
 strip = "debuginfo"
 overflow-checks = false
 lto = true
 opt-level = 3
+
+[dev-dependencies]
+criterion = "0.3"
+
+[[bench]]
+name = "vm_benchmark"
+harness = false

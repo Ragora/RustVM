@@ -163,7 +163,7 @@ fn criterion_benchmark(criterion: &mut Criterion) {
         // Use black_box to try and ensure that the entire VM system is ran
         black_box(vm.interpret(&large_loop_ops).unwrap());
 
-        let globals_read = vm.globals.borrow();
+        let globals_read = vm.globals.read().unwrap(); //.borrow();
         let result_value = globals_read.get(&variable_name_to_identifier("result_a".to_owned())).unwrap();
         
         // FIXME: API Issue here

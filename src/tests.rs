@@ -25,13 +25,11 @@ mod tests {
             ]
         };
 
-
         let vm = VirtualMachine::new(RefCell::new(ApplicationState {
             running: true
         }));
 
         // Add a native binding
-
         let mut namespace_write = vm.root_namespace.borrow_mut();
         namespace_write.add_function_entry(Function::NativeFunction { 
             parameters: Vec::new(), 
