@@ -1,6 +1,6 @@
 use std::
 {
-    collections::{HashMap}, hash::{Hasher, SipHasher}, rc::Rc, borrow::BorrowMut
+    collections::{HashMap}, hash::{Hasher, SipHasher}, rc::Rc, borrow::BorrowMut, marker::PhantomData
 };
 
 #[cfg(feature="async")]
@@ -19,24 +19,33 @@ use bytestream::{ByteOrder, StreamWriter};
 /// Type alias to clarify that this number refers to a variable uniquely
 pub type VariableIdentifier = u64;
 
-pub type NativeFunctionBinding = fn(vm: &VirtualMachine, frame: &StackFrame) -> Result<(), &'static str>;
+pub type NativeFunctionBinding<State> = Box<dyn Fn(&VirtualMachine<State>, &StackFrame<State>) -> Result<(), &'static str>>;
 
-pub enum Function
+pub struct FunctionParameter
+{
+    /// The name of the parameter
+    pub name: String,
+
+    /// The doc string
+    pub doc: String
+}
+
+pub enum Function<State> where State: Clone
 {
     NativeFunction {
         parameters: Vec<String>,
-        binding: NativeFunctionBinding
+        binding: NativeFunctionBinding<State>
     },
 
     VirtualFunction {
         parameters: Vec<String>,
-        instructions: InstructionSequence
+        instructions: InstructionSequence<State>
     }
 }
 
-impl Function
+impl<State> Function<State> where State: Clone
 {
-    pub fn call(&self, vm: &VirtualMachine, frame: &StackFrame) -> Result<(), &'static str>
+    pub fn call(&self, vm: &VirtualMachine<State>, frame: &StackFrame<State>) -> Result<(), &'static str>
     {
         match self
         {
@@ -54,19 +63,19 @@ impl Function
 }
 
 /// A namespace is a recursive structure used to store runtime generated data.
-pub struct Namespace<'a>
+pub struct Namespace<'a, State> where State: Clone
 {
     /// Child namespaces - used for enumeration
     #[cfg(not(feature="async"))]
-    pub children: RefCell<HashMap<String, Namespace<'a>>>,
+    pub children: RefCell<HashMap<String, Namespace<'a, State>>>,
 
     /// All class definitions.
     #[cfg(not(feature="async"))]
-    pub classes: RefCell<HashMap<String, ClassEntry>>,
+    pub classes: RefCell<HashMap<String, ClassEntry<State>>>,
 
     /// A mapping of function name to function data
     #[cfg(not(feature="async"))]
-    pub functions: RefCell<HashMap<String, Rc<Function>>>,
+    pub functions: RefCell<HashMap<String, Rc<Function<State>>>>,
 
     /// Child namespaces - used for enumeration
     #[cfg(feature="async")]
@@ -81,10 +90,10 @@ pub struct Namespace<'a>
     pub functions: Arc<RwLock<HashMap<String, Function>>>,
 
     /// Lookup cache for function data
-    pub function_cache: RefCell<HashMap<u64, Rc<Function>>>
+    pub function_cache: RefCell<HashMap<u64, Rc<Function<State>>>>
 }
 
-impl Namespace<'_>
+impl<State> Namespace<'_, State> where State: Clone
 {
     #[cfg(not(feature="async"))]
     pub fn new() -> Self
@@ -109,7 +118,7 @@ impl Namespace<'_>
         };
     }
 
-    pub fn add_function_entry_slice(&mut self, function: Function, path: &[String]) -> Result<(), &'static str>
+    pub fn add_function_entry_slice(&mut self, function: Function<State>, path: &[String]) -> Result<(), &'static str>
     {
         // Need to descend more
         if path.len() > 1
@@ -147,13 +156,13 @@ impl Namespace<'_>
         }
     }
 
-    pub fn add_function_entry(&mut self, function: Function, path: &Vec<String>) -> Result<(), &'static str>
+    pub fn add_function_entry(&mut self, function: Function<State>, path: &Vec<String>) -> Result<(), &'static str>
     {
         return self.add_function_entry_slice(function, path.as_slice());
     }
 
     /// Performs a recursive search for a given function with no caching.
-    pub fn lookup_function_uncached_slice(&self, path: &[String]) -> Result<Rc<Function>, &'static str>
+    pub fn lookup_function_uncached_slice(&self, path: &[String]) -> Result<Rc<Function<State>>, &'static str>
     {
         // Need to descend more
         if path.len() > 1
@@ -190,7 +199,7 @@ impl Namespace<'_>
         };
     }
 
-    pub fn lookup_function_cached(&mut self, path: &Vec<String>) -> Result<Rc<Function>, &'static str>
+    pub fn lookup_function_cached(&mut self, path: &Vec<String>) -> Result<Rc<Function<State>>, &'static str>
     {
         let mut hasher = SipHasher::new();
         for path_element in path.iter()
@@ -213,19 +222,19 @@ impl Namespace<'_>
         };
     }
 
-    pub fn lookup_function_uncached(&self, path: Vec<String>) -> Result<Rc<Function>, &'static str>
+    pub fn lookup_function_uncached(&self, path: Vec<String>) -> Result<Rc<Function<State>>, &'static str>
     {
         return self.lookup_function_uncached_slice(path.as_slice());
     }
 }
 
 /// A virtual class in memory, used for typedefs
-pub struct ClassEntry
+pub struct ClassEntry<State> where State: Clone
 {
     pub name: String,
     pub namespaces: Vec<String>,
 
-    pub functions: HashMap<String, Function>
+    pub functions: HashMap<String, Function<State>>
 }
 
 #[derive(Debug, Clone)]
@@ -240,22 +249,24 @@ pub enum AddressValue {
 }
 
 #[derive(Debug, Clone)]
-pub enum VariableReference {
+pub enum VariableReference<State> {
     Global {
+        phantom: PhantomData<State>,
         value: VariableIdentifier
     },
     Local {
+        phantom: PhantomData<State>,
         value: VariableIdentifier
     }
 }
 
-impl VariableReference
+impl<State> VariableReference<State> where State: Clone
 {
     #[inline(always)]
-    fn perform_assignment(&self, vm: &VirtualMachine, frame: &mut StackFrame, rhs: &SystemValue)
+    fn perform_assignment(&self, vm: &VirtualMachine<State>, frame: &mut StackFrame<State>, rhs: &SystemValue<State>)
     {
         match self {
-            VariableReference::Global { value } => {
+            VariableReference::Global { value, phantom } => {
                 #[cfg(feature="async")]
                 {
                     let mut globals_write = vm.globals.write().unwrap();
@@ -269,7 +280,7 @@ impl VariableReference
                 }
             },
 
-            VariableReference::Local { value } => {
+            VariableReference::Local { value, phantom } => {
                 frame.locals.insert((*value).clone(), rhs.as_raw(vm, frame));
             }
         }
@@ -277,10 +288,10 @@ impl VariableReference
 
     /// Performs a variable lookup, returning a raw value read from memory
     #[inline(always)]
-    pub fn deref(&self, vm: &VirtualMachine, frame: &StackFrame) -> Result<RawValue, &'static str>
+    pub fn deref(&self, vm: &VirtualMachine<State>, frame: &StackFrame<State>) -> Result<RawValue<State>, &'static str>
     {
         return match self {
-            VariableReference::Global { value } => {
+            VariableReference::Global { value, phantom } => {
                 #[cfg(feature="async")]
                 let globals_read = vm.globals.read().unwrap();
 
@@ -296,7 +307,7 @@ impl VariableReference
                     }
                 }
             },
-            VariableReference::Local { value } => {
+            VariableReference::Local { value, phantom } => {
                 match frame.locals.get(value) {
                     Some(value) => {
                         Ok(value.clone())
@@ -331,8 +342,8 @@ pub struct BooleanValue {
 }
 
 #[derive(Debug, Clone)]
-pub struct VariableValue {
-    value: VariableReference
+pub struct VariableValue<State> {
+    value: VariableReference<State>
 }
 
 // VariableSoftRef = Unresolved; requires a runtime lookup
@@ -340,19 +351,19 @@ pub struct VariableValue {
 
 /// Wrapper value representing a stored value in the virtual machine runtime.
 #[derive(Debug, Clone)]
-pub enum SystemValue {
+pub enum SystemValue<State> where State: Clone {
     Raw {
-        value: RawValue
+        value: RawValue<State>
     },
 
     Variable {
-        value: VariableReference
+        value: VariableReference<State>
     }
 }
 
-impl SystemValue {
+impl<State> SystemValue<State> where State: Clone {
     #[inline(always)]
-    pub fn as_raw(&self, vm: &VirtualMachine, frame: &StackFrame) -> RawValue {
+    pub fn as_raw(&self, vm: &VirtualMachine<State>, frame: &StackFrame<State>) -> RawValue<State> {
         return match self {
             SystemValue::Raw { value } => {
                 value.clone()
@@ -373,7 +384,7 @@ impl SystemValue {
     }
 
     #[inline(always)]
-    pub fn as_variable(&self, vm: &VirtualMachine, frame: &StackFrame) -> Result<VariableReference, &'static str> {
+    pub fn as_variable(&self, vm: &VirtualMachine<State>, frame: &StackFrame<State>) -> Result<VariableReference<State>, &'static str> {
         return match self {
             SystemValue::Raw { value: _ } => {
                 Err("Not a Variable")
@@ -386,28 +397,28 @@ impl SystemValue {
     }
 
     #[inline(always)]
-    pub fn equals(&self, vm: &VirtualMachine, frame: &StackFrame, rhs: SystemValue) -> bool {
+    pub fn equals(&self, vm: &VirtualMachine<State>, frame: &StackFrame<State>, rhs: SystemValue<State>) -> bool {
         return self.as_raw(vm, frame).equals(vm, frame, &rhs.as_raw(vm, frame));
     }
 }
 
 #[derive(Debug, Clone)]
-pub enum RawValue {
+pub enum RawValue<State> where State: Clone {
     Float(FloatValue),
     Integer(IntegerValue),
     String(StringValue),
     Boolean(BooleanValue),
-    Variable(VariableValue)
+    Variable(VariableValue<State>)
 }
 
-impl RawValue {
+impl<State> RawValue<State> where State: Clone {
     #[inline(always)]
-    fn equals(&self, vm: &VirtualMachine, frame: &StackFrame, rhs: &RawValue) -> bool {
+    fn equals(&self, vm: &VirtualMachine<State>, frame: &StackFrame<State>, rhs: &RawValue<State>) -> bool {
         return self.as_float(vm, frame) == rhs.as_float(vm, frame);
     }
 
     #[inline(always)]
-    fn as_string(&self, vm: &VirtualMachine, frame: &StackFrame) -> String {
+    pub fn as_string(&self, vm: &VirtualMachine<State>, frame: &StackFrame<State>) -> String {
         return match self {
             RawValue::Float(value) => {
                 (*value).value.to_string()
@@ -439,7 +450,7 @@ impl RawValue {
     }
 
     #[inline(always)]
-    fn add(&self, rhs: &RawValue, vm: &VirtualMachine, frame: &StackFrame) -> f32 {
+    fn add(&self, rhs: &RawValue<State>, vm: &VirtualMachine<State>, frame: &StackFrame<State>) -> f32 {
         let lhs = self.as_float(vm, frame);
         let rhs = rhs.as_float(vm, frame);
 
@@ -447,7 +458,7 @@ impl RawValue {
     }
 
     #[inline(always)]
-    fn subtract(&self, rhs: &RawValue, vm: &VirtualMachine, frame: &StackFrame) -> f32 {
+    fn subtract(&self, rhs: &RawValue<State>, vm: &VirtualMachine<State>, frame: &StackFrame<State>) -> f32 {
         let lhs = self.as_float(vm, frame);
         let rhs = rhs.as_float(vm, frame);
 
@@ -455,7 +466,7 @@ impl RawValue {
     }
 
     #[inline(always)]
-    fn multiply(&self, rhs: &RawValue, vm: &VirtualMachine, frame: &StackFrame) -> f32 {
+    fn multiply(&self, rhs: &RawValue<State>, vm: &VirtualMachine<State>, frame: &StackFrame<State>) -> f32 {
         let lhs = self.as_float(vm, frame);
         let rhs = rhs.as_float(vm, frame);
 
@@ -463,7 +474,7 @@ impl RawValue {
     }
 
     #[inline(always)]
-    fn divide(&self, rhs: &RawValue, vm: &VirtualMachine, frame: &StackFrame) -> f32 {
+    fn divide(&self, rhs: &RawValue<State>, vm: &VirtualMachine<State>, frame: &StackFrame<State>) -> f32 {
         let lhs = self.as_float(vm, frame);
         let rhs = rhs.as_float(vm, frame);
 
@@ -471,7 +482,7 @@ impl RawValue {
     }
 
     #[inline(always)]
-    fn negate(&mut self, vm: &mut VirtualMachine, frame: &StackFrame) {
+    fn negate(&mut self, vm: &mut VirtualMachine<State>, frame: &StackFrame<State>) {
         return match self {
             RawValue::Float(value) => {
                 (*value).value = -value.value
@@ -496,7 +507,7 @@ impl RawValue {
     }
 
     #[inline(always)]
-    fn as_float(&self, vm: &VirtualMachine, frame: &StackFrame) -> f32 {
+    pub fn as_float(&self, vm: &VirtualMachine<State>, frame: &StackFrame<State>) -> f32 {
         return match self {
             RawValue::Float(value) => {
                 value.value
@@ -535,7 +546,7 @@ impl RawValue {
     }
 
     #[inline(always)]
-    fn as_integer(&self, vm: &VirtualMachine, frame: &StackFrame) -> i32 {
+    pub fn as_integer(&self, vm: &VirtualMachine<State>, frame: &StackFrame<State>) -> i32 {
         return match self {
             RawValue::Float(value) => {
                 value.value as i32
@@ -574,7 +585,7 @@ impl RawValue {
     }
 
     #[inline(always)]
-    fn as_boolean(&self, vm: &VirtualMachine, frame: &StackFrame) -> bool {  
+    pub fn as_boolean(&self, vm: &VirtualMachine<State>, frame: &StackFrame<State>) -> bool {  
         return match self {
             RawValue::Float(value) => {
                 value.value != 0.0
@@ -613,7 +624,7 @@ pub struct PushFloat
     pub value: f32
 }
 
-pub enum OpCode
+pub enum OpCode<State>
 {
     // General state management
     PushFloat(PushFloat),
@@ -718,11 +729,11 @@ pub enum OpCode
     },
 
     PushVariable {
-        variable: VariableReference
+        variable: VariableReference<State>
     }
 }
 
-impl OpCode
+impl<State> OpCode<State>
 {
     fn get_type(&self) -> String
     {
@@ -764,16 +775,16 @@ impl OpCode
 }
 
 //type InstructionSequence = Vec<OpCode>;
-pub struct InstructionSequence
+pub struct InstructionSequence<State>
 {
-    pub ops: Vec<OpCode>
+    pub ops: Vec<OpCode<State>>
 }
 
 fn print_type_of<T>(_: &T) {
     println!("{}", std::any::type_name::<T>())
 }
 
-impl InstructionSequence
+impl<State> InstructionSequence<State>
 {
     pub fn serialize(&self)
     {
@@ -797,17 +808,17 @@ impl InstructionSequence
     }
 }
 
-pub struct StackFrame
+pub struct StackFrame<State> where State: Clone
 {
     /// Current VM thread-local stack state
     #[cfg(not(feature="register-vm"))]
-    pub stack: Vec<SystemValue>,
+    pub stack: Vec<SystemValue<State>>,
 
     /// Local thread-local variables allocated at this frame
-    pub locals: HashMap<VariableIdentifier, RawValue>
+    pub locals: HashMap<VariableIdentifier, RawValue<State>>
 }
 
-pub struct VirtualMachine<'a>
+pub struct VirtualMachine<'a, State> where State: Clone
 {
     /// A mapping of global string identifiers to their value
     #[cfg(feature="async")]
@@ -815,10 +826,13 @@ pub struct VirtualMachine<'a>
 
     /// A mapping of global string identifiers to their value
     #[cfg(not(feature="async"))]
-    pub globals: RefCell<HashMap<VariableIdentifier, RawValue>>,
+    pub globals: RefCell<HashMap<VariableIdentifier, RawValue<State>>>,
 
     /// Root namespaces
-    pub root_namespace: RefCell<Namespace<'a>>
+    pub root_namespace: RefCell<Namespace<'a, State>>,
+
+    /// Application state, user provided
+    pub state: State
 }
 
 #[inline(always)]
@@ -842,7 +856,7 @@ fn process_address(offset_out: &mut usize, address: &AddressValue)
     }
 }
 
-impl VirtualMachine<'_>
+impl<State> VirtualMachine<'_, State> where State: Clone
 {
     #[inline(always)]
     #[cfg(feature="async")]
@@ -860,20 +874,21 @@ impl VirtualMachine<'_>
 
     #[inline(always)]
     #[cfg(not(feature="async"))]
-    pub fn new() -> Self {
-        let mut globals: HashMap<VariableIdentifier, RawValue> = HashMap::new();
+    pub fn new(state: State) -> Self {
+        let mut globals: HashMap<VariableIdentifier, RawValue<State>> = HashMap::new();
         globals.reserve(1024);
 
         return Self {
             root_namespace: RefCell::new(Namespace::new()),
-            globals: RefCell::new(globals)
+            globals: RefCell::new(globals),
+            state: state
         };
     }
     
-    pub fn interpret(&self, instructions: &InstructionSequence) -> Result<(), &'static str>
+    pub fn interpret(&self, instructions: &InstructionSequence<State>) -> Result<(), &'static str>
     {
         // Allocate new frame
-        let mut stack: Vec<SystemValue> = Vec::new();
+        let mut stack: Vec<SystemValue<State>> = Vec::new();
         stack.reserve(1024);
         let mut frame = StackFrame {
             locals: HashMap::new(),
